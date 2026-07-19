@@ -26,6 +26,11 @@
   .h1 { font-size:20px; font-weight:bold; margin:0 0 2px; }
   .muted { color:#a8a29e; font-size:13px; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .inv-card { background:#fff; border:1px solid #e7e5e4; border-radius:12px; padding:8px; text-align:left; }
+  .inv-name { font-size:11.5px; font-weight:600; line-height:1.25; height:28px; overflow:hidden; }
+  .inv-cat { font-size:9.5px; color:#a8a29e; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .inv-stock { font-family:'Courier New',monospace; font-weight:bold; font-size:15px; margin-top:4px; }
   .card { background:#fff; border:1px solid #e7e5e4; border-radius:16px; box-shadow:0 1px 2px rgba(0,0,0,0.04); }
   .card.pad { padding:14px; }
   .stat-label { font-size:10px; text-transform:uppercase; letter-spacing:.03em; color:#a8a29e; font-weight:700; margin-bottom:4px; }
@@ -150,6 +155,17 @@ function isoWeek(iso){
   return target.getFullYear()+"-W"+String(week).padStart(2,"0");
 }
 function monthKey(iso){ return iso.slice(0,7); }
+function profitPct(profit, base){ if (!base) return 0; return (profit/base)*100; }
+function pctLabel(p){ return (p>=0?"":"-") + Math.abs(p).toFixed(1) + "%"; }
+function stockValuation(){
+  var costTotal = 0, saleTotal = 0;
+  db.products.forEach(function(p){
+    if (p.trackStock===false) return;
+    costTotal += (p.stock||0)*p.purchasePrice;
+    saleTotal += (p.stock||0)*p.salePrice;
+  });
+  return { cost:costTotal, sale:saleTotal };
+}
 function yearKey(iso){ return iso.slice(0,4); }
 function escapeHtml(s){
   if (s===undefined || s===null) return "";
@@ -164,11 +180,11 @@ function num(id){ var v = parseFloat(val(id)); return isNaN(v) ? 0 : v; }
 function defaultDB(){
   return {
     products: [
-      { id:"p1", name:"LED Bulb 12W", category:"Lighting", purchasePrice:180, salePrice:220, stock:40, reorderLevel:10 },
-      { id:"p2", name:"Copper Wire 90m (1.5mm)", category:"Wiring", purchasePrice:3200, salePrice:3600, stock:12, reorderLevel:4 },
-      { id:"p3", name:"Switch Board (2 Switch)", category:"Switches", purchasePrice:220, salePrice:280, stock:25, reorderLevel:8 },
-      { id:"p4", name:"MCB 32A", category:"Safety", purchasePrice:350, salePrice:420, stock:15, reorderLevel:5 },
-      { id:"p5", name:"Ceiling Fan 56\"", category:"Fans", purchasePrice:3800, salePrice:4300, stock:8, reorderLevel:3 }
+      { id:"p1", name:"LED Bulb 12W", category:"Lighting", purchasePrice:180, salePrice:220, stock:40, reorderLevel:10, trackStock:true },
+      { id:"p2", name:"Copper Wire 90m (1.5mm)", category:"Wiring", purchasePrice:3200, salePrice:3600, stock:12, reorderLevel:4, trackStock:true },
+      { id:"p3", name:"Switch Board (2 Switch)", category:"Switches", purchasePrice:220, salePrice:280, stock:25, reorderLevel:8, trackStock:true },
+      { id:"p4", name:"MCB 32A", category:"Safety", purchasePrice:350, salePrice:420, stock:15, reorderLevel:5, trackStock:true },
+      { id:"p5", name:"Ceiling Fan 56\"", category:"Fans", purchasePrice:3800, salePrice:4300, stock:8, reorderLevel:3, trackStock:true }
     ],
     categories: ["Lighting","Wiring","Switches","Safety","Fans"],
     sales: [],
@@ -185,7 +201,15 @@ function defaultDB(){
 function migrateDB(d){
   if (!d.categories) d.categories = Array.from(new Set((d.products||[]).map(function(p){ return p.category; }).filter(Boolean)));
   if (!d.heldSales) d.heldSales = [];
-  (d.sales||[]).forEach(function(s){ if (!s.time) s.time = "00:00"; if (!s.ts) s.ts = new Date(s.date+"T"+(s.time||"00:00")+":00").getTime() || Date.parse(s.date); });
+  (d.products||[]).forEach(function(p){ if (p.trackStock===undefined) p.trackStock = true; });
+  (d.sales||[]).forEach(function(s){
+    if (!s.time) s.time = "00:00";
+    if (!s.ts) s.ts = new Date(s.date+"T"+(s.time||"00:00")+":00").getTime() || Date.parse(s.date);
+    if (s.subtotal===undefined) s.subtotal = s.total;
+    if (s.discountType===undefined) s.discountType = "none";
+    if (s.discountValue===undefined) s.discountValue = 0;
+    if (s.discountAmount===undefined) s.discountAmount = 0;
+  });
   (d.customerPayments||[]).forEach(function(p){ if (!p.ts) p.ts = Date.parse(p.date) || Date.now(); });
   (d.supplierPayments||[]).forEach(function(p){ if (!p.ts) p.ts = Date.parse(p.date) || Date.now(); });
   return d;
@@ -213,9 +237,13 @@ var ui = {
   billingCategory: "Sab",
   customerId: "",
   paymentType: "Cash",
+  discountType: "none",
+  discountValue: 0,
   doneSale: null,
   chartPeriod: "daily",
   reportPeriod: "daily",
+  reportsSubView: null,
+  reportDrillKey: null,
   khataMode: "customers",
   khataSelected: null,
   khataPeriod: "yearly",
@@ -223,6 +251,7 @@ var ui = {
   pendingCustName: "",
   pendingCustPhone: "",
   editingProductId: null,
+  inventoryQuery: "",
   modal: null,
   modalData: {}
 };
@@ -359,7 +388,7 @@ function renderDashboard(){
   var monthExpense = db.incomeExpense.filter(function(e){ return monthKey(e.date)===thisMonth && e.type==="expense"; }).reduce(function(a,e){ return a+e.amount; },0);
   var monthIncome = db.incomeExpense.filter(function(e){ return monthKey(e.date)===thisMonth && e.type==="income"; }).reduce(function(a,e){ return a+e.amount; },0);
   var monthNet = sum(monthSales,"profit") + monthIncome - monthExpense;
-  var lowStock = db.products.filter(function(p){ return p.stock<=p.reorderLevel; });
+  var lowStock = db.products.filter(function(p){ return p.trackStock!==false && p.stock<=p.reorderLevel; });
   var totalCustomerDue = db.customers.reduce(function(a,c){ return a+custBalance(c); },0);
   var totalSupplierPayable = db.suppliers.reduce(function(a,s){ return a+supBalance(s); },0);
 
@@ -429,6 +458,10 @@ function backLink(){ return '<a class="icon-link" onclick="App.dashBack()">&larr
 function renderItemRanking(period, title){
   var today = todayISO();
   var matcher = periodMatcher(period, today);
+  return renderItemRankingByMatcher(matcher, title);
+}
+
+function renderItemRankingByMatcher(matcher, title){
   var periodSales = db.sales.filter(function(s){ return matcher(s.date); });
   var itemMap = {};
   periodSales.forEach(function(s){
@@ -450,14 +483,16 @@ function renderItemRanking(period, title){
     html += '<div class="card" style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;font-size:13px;">';
     html += '<tr style="border-bottom:1px solid #e7e5e4;text-align:left;color:#a8a29e;font-size:11px;text-transform:uppercase;">' +
       '<th style="padding:10px;">#</th><th style="padding:10px;">Item</th><th style="padding:10px;">Qty</th>' +
-      '<th style="padding:10px;">Sale</th><th style="padding:10px;">Profit</th></tr>';
+      '<th style="padding:10px;">Sale</th><th style="padding:10px;">Profit</th><th style="padding:10px;">Profit %</th></tr>';
     rows.forEach(function(r,i){
+      var pct = profitPct(r.profit, r.sale);
       html += '<tr style="border-bottom:1px solid #f5f5f4;">' +
         '<td style="padding:10px;color:#a8a29e;">'+(i+1)+'</td>' +
         '<td style="padding:10px;font-weight:600;">'+escapeHtml(r.name)+'</td>' +
         '<td style="padding:10px;font-family:monospace;">'+r.qty+'</td>' +
         '<td style="padding:10px;font-family:monospace;">'+fmt(r.sale)+'</td>' +
-        '<td style="padding:10px;font-family:monospace;font-weight:bold;color:#047857;">'+fmt(r.profit)+'</td></tr>';
+        '<td style="padding:10px;font-family:monospace;font-weight:bold;color:#047857;">'+fmt(r.profit)+'</td>' +
+        '<td style="padding:10px;font-family:monospace;color:#0f766e;">'+pctLabel(pct)+'</td></tr>';
     });
     html += "</table></div>";
     html += '<p class="muted" style="font-size:11px;">Sab se zyada profit wala item sab se upar hai.</p>';
@@ -528,6 +563,7 @@ function renderCategoryDetail(){
   html += backLink();
   html += '<div class="h1">Sale Ki Poori Tafseel ('+periodLabels[ui.chartPeriod]+')</div>';
   html += '<div class="grid2">' + statTile("Total Sale", fmt(total), "ink") + statTile("Total Profit", fmt(profit), "good") + '</div>';
+  html += '<div class="grid2">' + statTile("Profit %", pctLabel(profitPct(profit,total)), "accent") + '</div>';
 
   html += '<div class="card pad"><div style="font-weight:bold;font-size:14px;margin-bottom:8px;">Customer-Wise Kharidari</div>';
   if (custRows.length===0) html += '<p class="muted">Koi sale nahi hui.</p>';
@@ -564,12 +600,14 @@ function renderProductGrid(){
   });
   if (list.length===0) return '<p class="muted" style="grid-column:1/-1;">Koi product nahi mila.</p>';
   return list.map(function(p){
-    var disabled = p.stock<=0 ? "disabled" : "";
+    var noStock = p.trackStock!==false && p.stock<=0;
+    var disabled = noStock ? "disabled" : "";
+    var stockLabel = p.trackStock===false ? "Stock: &mdash;" : "Stock: "+p.stock;
     return '<button class="prod-card" '+disabled+' onclick="App.addToCart(\''+p.id+'\')">' +
       '<div class="prod-name">'+escapeHtml(p.name)+'</div>' +
       '<div class="prod-cat">&#127991; '+escapeHtml(p.category)+'</div>' +
       '<div class="prod-price">'+fmt(p.salePrice)+'</div>' +
-      '<div class="prod-stock">Stock: '+p.stock+'</div>' +
+      '<div class="prod-stock">'+stockLabel+'</div>' +
     '</button>';
   }).join("");
 }
@@ -581,9 +619,12 @@ function renderBilling(){
 
   var categories = ["Sab"].concat(db.products.reduce(function(acc,p){ if (acc.indexOf(p.category)<0) acc.push(p.category); return acc; }, []));
   var lines = cartLines();
-  var total = lines.reduce(function(a,l){ return a+l.lineTotal; },0);
+  var subtotal = lines.reduce(function(a,l){ return a+l.lineTotal; },0);
+  var discountAmt = ui.discountType==="percent" ? subtotal*(ui.discountValue||0)/100 : (ui.discountType==="amount" ? (ui.discountValue||0) : 0);
+  if (discountAmt>subtotal) discountAmt = subtotal;
+  var total = subtotal - discountAmt;
 
-  var html = '<div style="padding-bottom:480px;">';
+  var html = '<div style="padding-bottom:520px;">';
   html += '<div class="page space-y" style="padding-bottom:8px;">';
   html += '<div class="grid2">' +
     '<button class="btn btn-ghost btn-sm" onclick="App.showBillingView(\'history\')">&#128203; Bills History</button>' +
@@ -627,6 +668,14 @@ function renderBilling(){
       html += '<option value="'+c.id+'" '+sel+'>'+escapeHtml(c.name)+'</option>';
     });
     html += '</select>';
+    html += '<div class="grid2 mt2">';
+    html += '<select id="discountType" onchange="App.setDiscountType(this.value)">';
+    html += '<option value="none" '+(ui.discountType==="none"?"selected":"")+'>Discount Nahi</option>';
+    html += '<option value="percent" '+(ui.discountType==="percent"?"selected":"")+'>Discount %</option>';
+    html += '<option value="amount" '+(ui.discountType==="amount"?"selected":"")+'>Discount Rs</option>';
+    html += '</select>';
+    html += '<input id="discountValue" type="number" placeholder="Value" value="'+(ui.discountValue||"")+'" oninput="App.setDiscountValue(this.value)" '+(ui.discountType==="none"?"disabled":"")+'>';
+    html += '</div>';
     html += '<select id="paymentSelect" class="mt2" onchange="App.setPaymentType(this.value)">';
     html += '<option value="Cash" '+(ui.paymentType==="Cash"?"selected":"")+'>Cash</option>';
     html += '<option value="Udhaar" '+(ui.paymentType==="Udhaar"?"selected":"")+'>Udhaar</option>';
@@ -634,9 +683,11 @@ function renderBilling(){
     if (ui.paymentType==="Udhaar" && !ui.customerId){
       html += '<p style="color:#e11d48;font-size:12px;margin:4px 0 0;">Udhaar khate mein daalne ke liye saved customer select karna zaroori hai.</p>';
     }
-    html += '<div class="row-between mt2" style="background:#0B1220;border-radius:12px;padding:12px;">';
-    html += '<span style="color:#cbd5e1;font-size:11px;font-weight:700;text-transform:uppercase;">Total</span>';
-    html += '<span style="color:#6ee7b7;font-family:monospace;font-size:22px;font-weight:bold;">'+fmt(total)+'</span>';
+    html += '<div class="mt2" style="background:#0B1220;border-radius:12px;padding:12px;">';
+    html += '<div class="row-between" style="font-size:12px;color:#cbd5e1;"><span>Subtotal</span><span style="font-family:monospace;">'+fmt(subtotal)+'</span></div>';
+    if (discountAmt>0) html += '<div class="row-between" style="font-size:12px;color:#fca5a5;"><span>Discount</span><span style="font-family:monospace;">-'+fmt(discountAmt)+'</span></div>';
+    html += '<div class="row-between mt2"><span style="color:#cbd5e1;font-size:11px;font-weight:700;text-transform:uppercase;">Total</span>';
+    html += '<span style="color:#6ee7b7;font-family:monospace;font-size:22px;font-weight:bold;">'+fmt(total)+'</span></div>';
     html += '</div>';
     var canSell = lines.length>0 && (ui.paymentType==="Cash" || (ui.paymentType==="Udhaar" && ui.customerId));
     html += '<div class="grid2 mt2">';
@@ -744,6 +795,10 @@ function renderBillDoc(sale){
     html += '<div class="bill-row"><span class="iname">'+escapeHtml(it.name)+'</span><span>'+it.qty+'</span><span>'+fmt(it.price)+'</span><span style="text-align:right;font-weight:600;">'+fmt(it.price*it.qty)+'</span></div>';
   });
   html += '<div class="hr"></div>';
+  if (sale.discountAmount>0){
+    html += '<div class="row-between" style="font-size:13px;color:#57534e;"><span>Subtotal</span><span style="font-family:monospace;">'+fmt(sale.subtotal)+'</span></div>';
+    html += '<div class="row-between" style="font-size:13px;color:#be123c;"><span>Discount</span><span style="font-family:monospace;">-'+fmt(sale.discountAmount)+'</span></div>';
+  }
   html += '<div class="row-between"><span style="font-weight:600;font-size:13px;">Payment: '+sale.paymentType+'</span>';
   html += '<span style="font-family:monospace;font-size:22px;font-weight:bold;color:#0f766e;">'+fmt(sale.total)+'</span></div>';
   html += '<p class="center muted" style="font-style:italic;margin-top:14px;font-size:12px;">Shukriya! Dobara Tashreef Layen — '+SHOP.phone+'</p>';
@@ -755,26 +810,36 @@ function renderBillDoc(sale){
 // Inventory
 // ---------------------------------------------------------------------
 function renderInventory(){
+  var val_ = stockValuation();
   var html = '<div class="page space-y">';
   html += '<div class="row-between"><span class="h1">Inventory</span>' +
     '<div style="display:flex;gap:6px;"><button class="btn btn-ghost btn-sm" style="width:auto;" onclick="App.openModal(\'manageCategories\')">Categories</button>' +
-    '<button class="btn btn-primary btn-sm" style="width:auto;" onclick="App.openModal(\'addProduct\')">+ Naya Product</button></div></div>';
-  if (db.products.length===0) html += '<p class="muted">Koi product nahi. "+ Naya Product" se add karein.</p>';
-  db.products.forEach(function(p){
-    var low = p.stock<=p.reorderLevel;
-    html += '<div class="card pad" style="'+(low?"border-color:#fcd34d;":"")+'">';
-    html += '<div class="row-between"><div><div style="font-weight:600;">'+escapeHtml(p.name)+'</div>' +
-      '<div class="muted" style="font-size:12px;">'+escapeHtml(p.category)+' &middot; Purchase '+fmt(p.purchasePrice)+' &middot; Sale '+fmt(p.salePrice)+'</div></div>' +
-      '<div style="text-align:right;"><div style="font-family:monospace;font-weight:bold;'+(low?"color:#d97706;":"")+'">'+p.stock+'</div><div class="muted" style="font-size:10px;">in stock</div></div></div>';
-    html += '<div class="grid2 mt2">';
-    html += '<button class="btn btn-sm" style="background:#ccfbf1;color:#0f766e;border:1px solid #99f6e4;" onclick="App.openModal(\'addStock\',\''+p.id+'\')">+ Stock Add</button>';
-    html += '<button class="btn btn-sm" style="background:#e0e7ff;color:#4338ca;border:1px solid #c7d2fe;" onclick="App.openModal(\'editProduct\',\''+p.id+'\')">Edit</button>';
-    html += '</div>';
-    html += '<button class="btn btn-sm mt2" style="width:100%;background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;" onclick="App.deleteProduct(\''+p.id+'\')">Delete Product</button>';
-    html += "</div>";
-  });
+    '<button class="btn btn-primary btn-sm" style="width:auto;" onclick="App.openModal(\'addProduct\')">+ Naya</button></div></div>';
+  html += '<div class="grid2">' +
+    statTile("Total Stock Value (Cost)", fmt(val_.cost), "ink") +
+    statTile("Total Stock Value (Sale)", fmt(val_.sale), "good") +
+  '</div>';
+  html += '<input id="inventorySearch" placeholder="Product dhoondein..." value="'+escapeHtml(ui.inventoryQuery||"")+'" oninput="App.onInventorySearch(this.value)">';
+  html += '<div class="grid3" id="inventory-grid">'+renderInventoryGrid()+'</div>';
   html += "</div>";
   return html;
+}
+
+function renderInventoryGrid(){
+  var q = (ui.inventoryQuery||"").toLowerCase();
+  var list = db.products.filter(function(p){ return p.name.toLowerCase().indexOf(q)>=0; });
+  if (list.length===0) return '<p class="muted" style="grid-column:1/-1;">Koi product nahi mila.</p>';
+  return list.map(function(p){
+    var nonQty = p.trackStock===false;
+    var low = !nonQty && p.stock<=p.reorderLevel;
+    var stockDisplay = nonQty ? "&mdash;" : p.stock;
+    return '<button class="inv-card" onclick="App.openModal(\'productActions\',\''+p.id+'\')" style="'+(low?"border-color:#fcd34d;":"")+'">' +
+      '<div class="inv-name">'+escapeHtml(p.name)+'</div>' +
+      '<div class="inv-cat">'+escapeHtml(p.category)+'</div>' +
+      '<div class="inv-stock" style="'+(low?"color:#d97706;":"")+'">'+stockDisplay+'</div>' +
+      (nonQty ? '<div class="muted" style="font-size:9px;">Non-Stock Item</div>' : '<div class="muted" style="font-size:9px;">in stock</div>') +
+    '</button>';
+  }).join("");
 }
 
 // ---------------------------------------------------------------------
@@ -846,6 +911,13 @@ function renderKhataDetail(){
 // Reports
 // ---------------------------------------------------------------------
 function renderReports(){
+  if (ui.reportsSubView==="drill" && ui.reportDrillKey){
+    var keyFnDrill = { daily:function(d){return d;}, weekly:isoWeek, monthly:monthKey, yearly:yearKey }[ui.reportPeriod];
+    var drillKey = ui.reportDrillKey;
+    var matcherDrill = function(d){ return keyFnDrill(d)===drillKey; };
+    return renderReportsBackWrap(renderItemRankingByMatcher(matcherDrill, "Tafseel: "+drillKey));
+  }
+
   var keyFn = { daily:function(d){return d;}, weekly:isoWeek, monthly:monthKey, yearly:yearKey }[ui.reportPeriod];
   var map = {};
   function ensure(k){ if (!map[k]) map[k] = { key:k, total:0, cost:0, profit:0, income:0, expense:0 }; return map[k]; }
@@ -870,9 +942,10 @@ function renderReports(){
     html += '<button class="'+(ui.reportPeriod===p?"active":"")+'" onclick="App.setReportPeriod(\''+p+'\')">'+p+'</button>';
   });
   html += '</div>';
+  html += '<p class="muted" style="font-size:11px;">Kisi bhi row par tap karein us ki item-wise tafseel dekhne ke liye.</p>';
   if (groups.length===0) html += '<p class="muted">Abhi koi data nahi hai.</p>';
   groups.forEach(function(g){
-    html += '<div class="card report-card">';
+    html += '<div class="card report-card" style="cursor:pointer;" onclick="App.reportDrill(\''+g.key+'\')">';
     html += '<div class="row-between"><span style="font-weight:600;font-size:13px;">'+g.key+'</span>';
     html += '<span style="font-family:monospace;font-weight:bold;color:'+(g.net>=0?"#047857":"#be123c")+';">'+(g.net>=0?"&#9650;":"&#9660;")+' '+fmt(g.net)+'</span></div>';
     html += '<div class="report-grid">' +
@@ -880,10 +953,15 @@ function renderReports(){
       '<div>Sale Profit: <span style="font-family:monospace;color:#1c1917;">'+fmt(g.profit)+'</span></div>' +
       '<div>Other Income: <span style="font-family:monospace;color:#1c1917;">'+fmt(g.income)+'</span></div>' +
       '<div>Other Expense: <span style="font-family:monospace;color:#1c1917;">'+fmt(g.expense)+'</span></div>' +
+      '<div>Profit %: <span style="font-family:monospace;color:#0f766e;">'+pctLabel(profitPct(g.profit,g.total))+'</span></div>' +
     '</div></div>';
   });
   html += "</div>";
   return html;
+}
+
+function renderReportsBackWrap(innerHtml){
+  return innerHtml.replace('onclick="App.dashBack()"', 'onclick="App.reportDrillBack()"');
 }
 
 // ---------------------------------------------------------------------
@@ -904,24 +982,48 @@ function renderModal(){
   if (!ui.modal) return "";
   if (ui.modal==="addProduct") return modalWrap("Naya Product",
     '<label class="field"><span class="lbl">Product Naam</span><input id="m_name"></label>' +
-    '<label class="field"><span class="lbl">Category</span><select id="m_category">'+categoryOptionsHtml(db.categories[0])+'</select></label>' +
+    '<label class="field"><span class="lbl">Category</span><select id="m_category"><option value="">— Category Chunein —</option>'+categoryOptionsHtml("")+'</select></label>' +
     '<div class="grid2"><label class="field"><span class="lbl">Purchase Price</span><input id="m_pp" type="number"></label>' +
     '<label class="field"><span class="lbl">Sale Price</span><input id="m_sp" type="number"></label></div>' +
-    '<div class="grid2"><label class="field"><span class="lbl">Opening Stock</span><input id="m_stock" type="number"></label>' +
+    '<label class="field" style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="m_notrack" style="width:auto;" onchange="App.toggleTrackStockUI()"> <span class="lbl" style="margin:0;">Ye item bila quantity/stock ke list karein (jaise services ya loose items)</span></label>' +
+    '<div id="stockFieldsWrap" class="grid2"><label class="field"><span class="lbl">Opening Stock</span><input id="m_stock" type="number"></label>' +
     '<label class="field"><span class="lbl">Reorder Level</span><input id="m_reorder" type="number"></label></div>' +
     '<button class="btn btn-primary mt2" onclick="App.saveNewProduct()">Save Product</button>'
   );
   if (ui.modal==="editProduct"){
     var ep = db.products.filter(function(x){ return x.id===ui.modalData.productId; })[0];
     if (!ep) return "";
+    var epNoTrack = ep.trackStock===false;
     return modalWrap("Product Edit Karein",
       '<label class="field"><span class="lbl">Product Naam</span><input id="m_name" value="'+escapeHtml(ep.name)+'"></label>' +
-      '<label class="field"><span class="lbl">Category</span><select id="m_category">'+categoryOptionsHtml(ep.category)+'</select></label>' +
+      '<label class="field"><span class="lbl">Category</span><select id="m_category"><option value="">— Category Chunein —</option>'+categoryOptionsHtml(ep.category)+'</select></label>' +
       '<div class="grid2"><label class="field"><span class="lbl">Purchase Price</span><input id="m_pp" type="number" value="'+ep.purchasePrice+'"></label>' +
       '<label class="field"><span class="lbl">Sale Price</span><input id="m_sp" type="number" value="'+ep.salePrice+'"></label></div>' +
-      '<div class="grid2"><label class="field"><span class="lbl">Current Stock</span><input id="m_stock" type="number" value="'+ep.stock+'"></label>' +
+      '<label class="field" style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="m_notrack" style="width:auto;" '+(epNoTrack?"checked":"")+' onchange="App.toggleTrackStockUI()"> <span class="lbl" style="margin:0;">Ye item bila quantity/stock ke list karein</span></label>' +
+      '<div id="stockFieldsWrap" class="grid2" style="'+(epNoTrack?"display:none;":"")+'"><label class="field"><span class="lbl">Current Stock</span><input id="m_stock" type="number" value="'+ep.stock+'"></label>' +
       '<label class="field"><span class="lbl">Reorder Level</span><input id="m_reorder" type="number" value="'+ep.reorderLevel+'"></label></div>' +
       '<button class="btn btn-primary mt2" onclick="App.saveEditProduct()">Changes Save Karein</button>'
+    );
+  }
+  if (ui.modal==="productActions"){
+    var pa = db.products.filter(function(x){ return x.id===ui.modalData.productId; })[0];
+    if (!pa) return "";
+    var paNonQty = pa.trackStock===false;
+    return modalWrap(pa.name,
+      '<div class="muted" style="font-size:12px;margin-bottom:10px;">' + escapeHtml(pa.category) + '</div>' +
+      '<div class="grid2 mb3">' +
+        '<div class="card pad"><div class="stat-label">Purchase Price</div><div class="stat-val ink" style="font-size:15px;">'+fmt(pa.purchasePrice)+'</div></div>' +
+        '<div class="card pad"><div class="stat-label">Sale Price</div><div class="stat-val ink" style="font-size:15px;">'+fmt(pa.salePrice)+'</div></div>' +
+      '</div>' +
+      (paNonQty ?
+        '<p class="muted" style="margin-bottom:10px;">Ye Non-Stock item hai — quantity track nahi ho rahi.</p>' :
+        '<div class="card pad mb3"><div class="stat-label">Current Stock</div><div class="stat-val '+(pa.stock<=pa.reorderLevel?"bad":"good")+'" style="font-size:18px;">'+pa.stock+'</div></div>'
+      ) +
+      '<div class="grid2">' +
+      (paNonQty ? '' : '<button class="btn btn-sm" style="background:#ccfbf1;color:#0f766e;border:1px solid #99f6e4;" onclick="App.closeModal(); App.openModal(\'addStock\',\''+pa.id+'\')">+ Stock Add</button>') +
+      '<button class="btn btn-sm" style="background:#e0e7ff;color:#4338ca;border:1px solid #c7d2fe;" onclick="App.openModal(\'editProduct\',\''+pa.id+'\')">Edit</button>' +
+      '</div>' +
+      '<button class="btn btn-sm mt2" style="width:100%;background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;" onclick="App.deleteProduct(\''+pa.id+'\')">Delete Product</button>'
     );
   }
   if (ui.modal==="manageCategories"){
@@ -1007,7 +1109,8 @@ function drawBoltOnCanvas(ctx, cx, cy, scale, color){
 function buildBillCanvas(sale){
   var rowH = 26;
   var width = 640;
-  var height = 400 + sale.items.length*rowH + (sale.customerName ? 30 : 0);
+  var extraForDiscount = (sale.discountAmount>0) ? 44 : 0;
+  var height = 400 + sale.items.length*rowH + (sale.customerName ? 30 : 0) + extraForDiscount;
   var SCALE = 3; // higher resolution for crisp JPG/PDF output
   var canvas = document.createElement("canvas");
   canvas.width = width*SCALE; canvas.height = height*SCALE;
@@ -1046,6 +1149,14 @@ function buildBillCanvas(sale){
     y+=rowH;
   });
   y+=6; ctx.strokeStyle="#E5E7EB"; ctx.beginPath(); ctx.moveTo(24,y); ctx.lineTo(width-24,y); ctx.stroke(); y+=30;
+  if (sale.discountAmount>0){
+    ctx.font="13px Arial"; ctx.fillStyle="#57534e"; ctx.fillText("Subtotal",24,y);
+    ctx.textAlign="right"; ctx.fillText(fmt(sale.subtotal),width-24,y); ctx.textAlign="left";
+    y+=20;
+    ctx.fillStyle="#be123c"; ctx.fillText("Discount",24,y);
+    ctx.textAlign="right"; ctx.fillText("-"+fmt(sale.discountAmount),width-24,y); ctx.textAlign="left";
+    y+=24;
+  }
   ctx.font="bold 13px Arial"; ctx.fillStyle="#374151"; ctx.fillText("Payment: "+sale.paymentType,24,y);
   ctx.font="bold 20px Arial"; ctx.fillStyle="#0F766E"; ctx.textAlign="right"; ctx.fillText("TOTAL: "+fmt(sale.total),width-24,y); ctx.textAlign="left";
   y+=40; ctx.font="italic 12px Arial"; ctx.fillStyle="#9CA3AF"; ctx.textAlign="center";
@@ -1147,7 +1258,7 @@ function maybeAutoSync(){
 // Actions (all UI event handlers live on window.App)
 // ---------------------------------------------------------------------
 window.App = {
-  setTab: function(t){ ui.tab=t; ui.doneSale=null; ui.khataSelected=null; ui.billingView="cart"; ui.dashSubView=null; render(); },
+  setTab: function(t){ ui.tab=t; ui.doneSale=null; ui.khataSelected=null; ui.billingView="cart"; ui.dashSubView=null; ui.reportsSubView=null; ui.reportDrillKey=null; render(); },
   showDashSub: function(v){ ui.dashSubView=v; render(); },
   dashBack: function(){ ui.dashSubView=null; render(); },
   setKhataPeriod: function(p){ ui.khataPeriod=p; render(); },
@@ -1158,9 +1269,10 @@ window.App = {
   setCategoryFilter: function(c){ ui.billingCategory=c; render(); },
   addToCart: function(pid){
     var p = db.products.filter(function(x){ return x.id===pid; })[0];
-    if (!p || p.stock<=0) return;
+    if (!p) return;
+    if (p.trackStock!==false && p.stock<=0) return;
     var existing = ui.cart.filter(function(i){ return i.productId===pid; })[0];
-    if (existing){ if (existing.qty<p.stock) existing.qty++; }
+    if (existing){ if (p.trackStock===false || existing.qty<p.stock) existing.qty++; }
     else ui.cart.push({ productId:pid, qty:1 });
     render();
   },
@@ -1179,11 +1291,16 @@ window.App = {
     render();
   },
   setPaymentType: function(v){ ui.paymentType=v; render(); },
+  setDiscountType: function(v){ ui.discountType=v; render(); },
+  setDiscountValue: function(v){ ui.discountValue=parseFloat(v)||0; render(); },
   completeSale: function(){
     var lines = cartLines();
     if (lines.length===0) return;
-    var total = lines.reduce(function(a,l){ return a+l.lineTotal; },0);
+    var subtotal = lines.reduce(function(a,l){ return a+l.lineTotal; },0);
     var cost = lines.reduce(function(a,l){ return a+l.lineCost; },0);
+    var discountAmount = ui.discountType==="percent" ? subtotal*(ui.discountValue||0)/100 : (ui.discountType==="amount" ? (ui.discountValue||0) : 0);
+    if (discountAmount>subtotal) discountAmount = subtotal;
+    var total = subtotal - discountAmount;
     var profit = total-cost;
     if (ui.paymentType==="Udhaar" && !ui.customerId) return;
     var custName = val("custNameInput");
@@ -1195,6 +1312,7 @@ window.App = {
       time: nowTime(),
       ts: Date.now(),
       items: lines.map(function(l){ return { productId:l.productId, name:l.product.name, qty:l.qty, price:l.product.salePrice, cost:l.product.purchasePrice }; }),
+      subtotal: subtotal, discountType: ui.discountType, discountValue: ui.discountValue||0, discountAmount: discountAmount,
       total: total, cost: cost, profit: profit,
       customerId: ui.customerId || null,
       customerName: custName || "",
@@ -1203,6 +1321,7 @@ window.App = {
     };
     db.sales.unshift(sale);
     db.products = db.products.map(function(p){
+      if (p.trackStock===false) return p;
       var line = lines.filter(function(l){ return l.productId===p.id; })[0];
       return line ? Object.assign({}, p, { stock: p.stock-line.qty }) : p;
     });
@@ -1211,6 +1330,8 @@ window.App = {
     ui.cart = [];
     ui.customerId = "";
     ui.paymentType = "Cash";
+    ui.discountType = "none";
+    ui.discountValue = 0;
     ui.pendingCustName = "";
     ui.pendingCustPhone = "";
     render();
@@ -1268,28 +1389,43 @@ window.App = {
 
   saveNewProduct: function(){
     var name = val("m_name"); if (!name) return;
+    var category = val("m_category");
+    if (!category){ alert("Category select karna zaroori hai. Agar list mein nahi hai to pehle 'Categories' se add karein."); return; }
+    var noTrack = document.getElementById("m_notrack") && document.getElementById("m_notrack").checked;
     db.products.push({
-      id: uid(), name: name, category: val("m_category")||db.categories[0]||"General",
+      id: uid(), name: name, category: category,
       purchasePrice: num("m_pp"), salePrice: num("m_sp"),
-      stock: num("m_stock"), reorderLevel: num("m_reorder")||5
+      stock: noTrack ? 0 : num("m_stock"), reorderLevel: noTrack ? 0 : (num("m_reorder")||5),
+      trackStock: !noTrack
     });
     saveDB(); ui.modal=null; render();
   },
   saveEditProduct: function(){
     var pid = ui.modalData.productId;
     var name = val("m_name"); if (!name) return;
+    var category = val("m_category");
+    if (!category){ alert("Category select karna zaroori hai."); return; }
+    var noTrack = document.getElementById("m_notrack") && document.getElementById("m_notrack").checked;
     db.products = db.products.map(function(p){
       return p.id===pid ? Object.assign({}, p, {
-        name: name, category: val("m_category")||p.category,
+        name: name, category: category,
         purchasePrice: num("m_pp"), salePrice: num("m_sp"),
-        stock: num("m_stock"), reorderLevel: num("m_reorder")||p.reorderLevel
+        stock: noTrack ? 0 : num("m_stock"), reorderLevel: noTrack ? 0 : (num("m_reorder")||p.reorderLevel),
+        trackStock: !noTrack
       }) : p;
     });
     saveDB(); ui.modal=null; render();
   },
+  toggleTrackStockUI: function(){
+    var cb = document.getElementById("m_notrack");
+    var wrap = document.getElementById("stockFieldsWrap");
+    if (cb && wrap) wrap.style.display = cb.checked ? "none" : "";
+  },
+  onInventorySearch: function(v){ ui.inventoryQuery=v; document.getElementById("inventory-grid").innerHTML = renderInventoryGrid(); },
   deleteProduct: function(pid){
     if (!confirm("Kya aap waqai is product ko delete karna chahte hain?")) return;
     db.products = db.products.filter(function(p){ return p.id!==pid; });
+    ui.modal=null;
     saveDB(); render();
   },
   addCategory: function(){
@@ -1348,7 +1484,9 @@ window.App = {
   },
 
   setChartPeriod: function(p){ ui.chartPeriod=p; render(); },
-  setReportPeriod: function(p){ ui.reportPeriod=p; render(); },
+  setReportPeriod: function(p){ ui.reportPeriod=p; ui.reportsSubView=null; ui.reportDrillKey=null; render(); },
+  reportDrill: function(key){ ui.reportsSubView="drill"; ui.reportDrillKey=key; render(); },
+  reportDrillBack: function(){ ui.reportsSubView=null; ui.reportDrillKey=null; render(); },
   saveIncomeExpense: function(){
     var amt = num("m_amount2"); var cat = val("m_category2");
     if (!amt || !cat) return;
