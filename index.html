@@ -896,7 +896,14 @@ function renderKhataDetail(){
   html += '<div style="font-weight:bold;font-size:16px;">'+escapeHtml(item.name)+'</div><div class="muted">'+escapeHtml(item.phone||"")+'</div>';
   html += '<div class="row-between mt2"><span class="muted" style="text-transform:uppercase;font-size:11px;font-weight:700;">'+(mode==="customers"?"Balance Due":"Balance Payable")+'</span>';
   html += '<span style="font-family:monospace;font-size:20px;font-weight:bold;color:'+(bal>0?"#be123c":"#047857")+';">'+fmt(bal)+'</span></div></div>';
-  html += '<button class="btn btn-primary" onclick="App.openModal(\'payment\')">'+(mode==="customers"?"Payment Wasool Ki":"Payment Ki")+'</button>';
+  if (mode==="customers"){
+    html += '<div class="grid2">';
+    html += '<button class="btn btn-primary" onclick="App.startBillForCustomer(\''+item.id+'\')">&#128722; Naya Udhaar Bill</button>';
+    html += '<button class="btn btn-ghost" onclick="App.openModal(\'payment\')">Payment Wasool Ki</button>';
+    html += '</div>';
+  } else {
+    html += '<button class="btn btn-primary" onclick="App.openModal(\'payment\')">Payment Ki</button>';
+  }
   html += '<div class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase;margin-top:10px;">History</div>';
   if (history.length===0) html += '<p class="muted">Abhi tak koi transaction nahi.</p>';
   history.forEach(function(h){
@@ -1466,6 +1473,21 @@ window.App = {
   setKhataMode: function(m){ ui.khataMode=m; ui.khataSelected=null; render(); },
   openKhataDetail: function(id){ ui.khataSelected=id; render(); },
   closeKhataDetail: function(){ ui.khataSelected=null; render(); },
+  startBillForCustomer: function(customerId){
+    var c = db.customers.filter(function(x){ return x.id===customerId; })[0];
+    if (!c) return;
+    ui.tab = "billing";
+    ui.billingView = "cart";
+    ui.doneSale = null;
+    ui.cart = [];
+    ui.customerId = c.id;
+    ui.pendingCustName = c.name;
+    ui.pendingCustPhone = c.phone||"";
+    ui.paymentType = "Udhaar";
+    ui.discountType = "none";
+    ui.discountValue = 0;
+    render();
+  },
   saveNewEntity: function(){
     var name = val("m_name"); if (!name) return;
     var entity = { id:uid(), name:name, phone:val("m_phone"), opening:num("m_opening") };
