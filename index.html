@@ -15,7 +15,11 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin:0; background:#F5F5F4; font-family: Arial, Helvetica, sans-serif; color:#1c1917; }
+  body { margin:0; background:#F5F5F4; font-family: Arial, Helvetica, sans-serif; color:#1c1917; font-weight:500; font-size:15px; }
+  input, select { font-weight:600; }
+  .muted { font-weight:500; }
+  .stat-val { font-weight:800 !important; }
+  .prod-name, .inv-name, .khata-item-name { font-weight:700 !important; }
   #app { min-height:100vh; padding-bottom:70px; }
   .header { background:#0B1220; color:#fff; padding:12px 16px; display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; z-index:30; }
   .header-left { display:flex; align-items:center; gap:8px; min-width:0; }
@@ -166,6 +170,10 @@ function stockValuation(){
   });
   return { cost:costTotal, sale:saleTotal };
 }
+function discountFactor(sale){
+  if (!sale.subtotal || sale.subtotal<=0) return 1;
+  return sale.total/sale.subtotal;
+}
 function yearKey(iso){ return iso.slice(0,4); }
 function escapeHtml(s){
   if (s===undefined || s===null) return "";
@@ -231,6 +239,7 @@ var db = loadDB();
 var ui = {
   tab: "dashboard",
   cart: [],
+  cartExpanded: false,
   billingView: "cart",
   billingQuery: "",
   billHistoryQuery: "",
@@ -396,11 +405,12 @@ function renderDashboard(){
   var periodSales = db.sales.filter(function(s){ return matcher(s.date); });
   var catMap = {};
   periodSales.forEach(function(s){
+    var df = discountFactor(s);
     (s.items||[]).forEach(function(it){
       var prod = db.products.filter(function(p){ return p.id===it.productId; })[0];
       var cat = prod ? prod.category : "Other";
       if (!catMap[cat]) catMap[cat] = { name:cat, sale:0 };
-      catMap[cat].sale += it.price*it.qty;
+      catMap[cat].sale += it.price*it.qty*df;
     });
   });
   var categoryData = Object.keys(catMap).map(function(k){ return catMap[k]; }).sort(function(a,b){ return b.sale-a.sale; });
@@ -465,11 +475,13 @@ function renderItemRankingByMatcher(matcher, title){
   var periodSales = db.sales.filter(function(s){ return matcher(s.date); });
   var itemMap = {};
   periodSales.forEach(function(s){
+    var df = discountFactor(s);
     (s.items||[]).forEach(function(it){
       if (!itemMap[it.productId]) itemMap[it.productId] = { name:it.name, qty:0, sale:0, profit:0 };
+      var effSale = it.price*it.qty*df;
       itemMap[it.productId].qty += it.qty;
-      itemMap[it.productId].sale += it.price*it.qty;
-      itemMap[it.productId].profit += (it.price-it.cost)*it.qty;
+      itemMap[it.productId].sale += effSale;
+      itemMap[it.productId].profit += effSale - it.cost*it.qty;
     });
   });
   var rows = Object.keys(itemMap).map(function(k){ return itemMap[k]; }).sort(function(a,b){ return b.profit-a.profit; });
@@ -551,10 +563,11 @@ function renderCategoryDetail(){
 
   var itemMap = {};
   periodSales.forEach(function(s){
+    var df = discountFactor(s);
     (s.items||[]).forEach(function(it){
       if (!itemMap[it.productId]) itemMap[it.productId] = { name:it.name, qty:0, sale:0 };
       itemMap[it.productId].qty += it.qty;
-      itemMap[it.productId].sale += it.price*it.qty;
+      itemMap[it.productId].sale += it.price*it.qty*df;
     });
   });
   var itemRows = Object.keys(itemMap).map(function(k){ return itemMap[k]; }).sort(function(a,b){ return b.qty-a.qty; });
@@ -612,6 +625,26 @@ function renderProductGrid(){
   }).join("");
 }
 
+function computeCartTotals(){
+  var lines = cartLines();
+  var subtotal = lines.reduce(function(a,l){ return a+l.lineTotal; },0);
+  var discountAmt = ui.discountType==="percent" ? subtotal*(ui.discountValue||0)/100 : (ui.discountType==="amount" ? (ui.discountValue||0) : 0);
+  if (discountAmt>subtotal) discountAmt = subtotal;
+  var total = subtotal - discountAmt;
+  return { subtotal:subtotal, discountAmt:discountAmt, total:total };
+}
+
+function renderCartTotalsBox(){
+  var t = computeCartTotals();
+  var html = '<div class="mt2" style="background:#0B1220;border-radius:12px;padding:12px;">';
+  html += '<div class="row-between" style="font-size:12px;color:#cbd5e1;"><span>Subtotal</span><span style="font-family:monospace;">'+fmt(t.subtotal)+'</span></div>';
+  if (t.discountAmt>0) html += '<div class="row-between" style="font-size:12px;color:#fca5a5;"><span>Discount</span><span style="font-family:monospace;">-'+fmt(t.discountAmt)+'</span></div>';
+  html += '<div class="row-between mt2"><span style="color:#cbd5e1;font-size:11px;font-weight:700;text-transform:uppercase;">Total</span>';
+  html += '<span style="color:#6ee7b7;font-family:monospace;font-size:22px;font-weight:bold;">'+fmt(t.total)+'</span></div>';
+  html += '</div>';
+  return html;
+}
+
 function renderBilling(){
   if (ui.doneSale) return renderBillScreen(ui.doneSale);
   if (ui.billingView==="history") return renderBillHistory();
@@ -619,11 +652,6 @@ function renderBilling(){
 
   var categories = ["Sab"].concat(db.products.reduce(function(acc,p){ if (acc.indexOf(p.category)<0) acc.push(p.category); return acc; }, []));
   var lines = cartLines();
-  var subtotal = lines.reduce(function(a,l){ return a+l.lineTotal; },0);
-  var discountAmt = ui.discountType==="percent" ? subtotal*(ui.discountValue||0)/100 : (ui.discountType==="amount" ? (ui.discountValue||0) : 0);
-  if (discountAmt>subtotal) discountAmt = subtotal;
-  var total = subtotal - discountAmt;
-
   var html = '<div style="padding-bottom:520px;">';
   html += '<div class="page space-y" style="padding-bottom:8px;">';
   html += '<div class="grid2">' +
@@ -639,64 +667,72 @@ function renderBilling(){
   html += '<div class="grid2" id="product-grid">'+renderProductGrid()+'</div>';
   html += "</div>";
 
-  html += '<div class="cart-drawer"><div class="cart-inner">';
-  html += '<div class="muted" style="font-weight:700;text-transform:uppercase;font-size:11px;margin-bottom:6px;">&#128221; Cart ('+lines.length+')</div>';
-  if (lines.length===0){
-    html += '<p class="muted">Cart khali hai — product par tap karein.</p>';
+  html += '<div class="cart-drawer">';
+  if (lines.length>0 && !ui.cartExpanded){
+    var quickTotal = computeCartTotals().total;
+    html += '<button style="width:100%;padding:14px 16px;background:#0f766e;color:#fff;border:none;display:flex;align-items:center;justify-content:space-between;border-radius:16px 16px 0 0;" onclick="App.toggleCartExpanded()">' +
+      '<span style="font-weight:700;font-size:13px;">&#128221; '+lines.length+' Item(s)</span>' +
+      '<span style="font-family:monospace;font-weight:bold;font-size:16px;">'+fmt(quickTotal)+' &nbsp;&#9650; Bill Banayein</span>' +
+    '</button>';
   } else {
-    html += '<div class="cart-items-scroll">';
-    lines.forEach(function(l){
-      html += '<div class="cart-line"><div><div style="font-size:13px;font-weight:600;">'+escapeHtml(l.product.name)+'</div>' +
-        '<div class="muted" style="font-family:monospace;font-size:12px;">'+fmt(l.lineTotal)+'</div></div>' +
-        '<div style="display:flex;align-items:center;gap:8px;">' +
-        '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',-1)">-</button>' +
-        '<span style="width:20px;text-align:center;font-family:monospace;">'+l.qty+'</span>' +
-        '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',1)">+</button>' +
-        '</div></div>';
-    });
+    html += '<div class="cart-inner">';
+    html += '<div class="row-between" style="margin-bottom:6px;">';
+    html += '<span class="muted" style="font-weight:700;text-transform:uppercase;font-size:11px;">&#128221; Cart ('+lines.length+')</span>';
+    if (lines.length>0) html += '<a class="icon-link" onclick="App.toggleCartExpanded()">&#9660; Chhota Karein</a>';
     html += '</div>';
+    if (lines.length===0){
+      html += '<p class="muted">Cart khali hai — product par tap karein.</p>';
+    } else {
+      html += '<div class="cart-items-scroll">';
+      lines.forEach(function(l){
+        html += '<div class="cart-line"><div><div style="font-size:13px;font-weight:600;">'+escapeHtml(l.product.name)+'</div>' +
+          '<div class="muted" style="font-family:monospace;font-size:12px;">'+fmt(l.lineTotal)+'</div></div>' +
+          '<div style="display:flex;align-items:center;gap:8px;">' +
+          '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',-1)">-</button>' +
+          '<span style="width:20px;text-align:center;font-family:monospace;">'+l.qty+'</span>' +
+          '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',1)">+</button>' +
+          '</div></div>';
+      });
+      html += '</div>';
 
-    html += '<div class="cart-bottom">';
-    html += '<div class="grid2 mt2">';
-    html += '<input id="custNameInput" placeholder="Customer Naam" value="'+escapeHtml(ui.pendingCustName||"")+'" oninput="App.onCustomerFieldInput()">';
-    html += '<input id="custPhoneInput" placeholder="Contact Number" value="'+escapeHtml(ui.pendingCustPhone||"")+'" oninput="App.onCustomerFieldInput()">';
-    html += '</div>';
-    html += '<select id="custSelect" class="mt2" onchange="App.pickCustomer(this.value)">';
-    html += '<option value="">— Ya Saved Customer Se Bharein —</option>';
-    db.customers.forEach(function(c){
-      var sel = ui.customerId===c.id ? "selected" : "";
-      html += '<option value="'+c.id+'" '+sel+'>'+escapeHtml(c.name)+'</option>';
-    });
-    html += '</select>';
-    html += '<div class="grid2 mt2">';
-    html += '<select id="discountType" onchange="App.setDiscountType(this.value)">';
-    html += '<option value="none" '+(ui.discountType==="none"?"selected":"")+'>Discount Nahi</option>';
-    html += '<option value="percent" '+(ui.discountType==="percent"?"selected":"")+'>Discount %</option>';
-    html += '<option value="amount" '+(ui.discountType==="amount"?"selected":"")+'>Discount Rs</option>';
-    html += '</select>';
-    html += '<input id="discountValue" type="number" placeholder="Value" value="'+(ui.discountValue||"")+'" oninput="App.setDiscountValue(this.value)" '+(ui.discountType==="none"?"disabled":"")+'>';
-    html += '</div>';
-    html += '<select id="paymentSelect" class="mt2" onchange="App.setPaymentType(this.value)">';
-    html += '<option value="Cash" '+(ui.paymentType==="Cash"?"selected":"")+'>Cash</option>';
-    html += '<option value="Udhaar" '+(ui.paymentType==="Udhaar"?"selected":"")+'>Udhaar</option>';
-    html += '</select>';
-    if (ui.paymentType==="Udhaar" && !ui.customerId){
-      html += '<p style="color:#e11d48;font-size:12px;margin:4px 0 0;">Udhaar khate mein daalne ke liye saved customer select karna zaroori hai.</p>';
+      html += '<div class="cart-bottom">';
+      html += '<div class="grid2 mt2">';
+      html += '<input id="custNameInput" placeholder="Customer Naam" value="'+escapeHtml(ui.pendingCustName||"")+'" oninput="App.onCustomerFieldInput()">';
+      html += '<input id="custPhoneInput" placeholder="Contact Number" value="'+escapeHtml(ui.pendingCustPhone||"")+'" oninput="App.onCustomerFieldInput()">';
+      html += '</div>';
+      html += '<select id="custSelect" class="mt2" onchange="App.pickCustomer(this.value)">';
+      html += '<option value="">— Ya Saved Customer Se Bharein —</option>';
+      db.customers.forEach(function(c){
+        var sel = ui.customerId===c.id ? "selected" : "";
+        html += '<option value="'+c.id+'" '+sel+'>'+escapeHtml(c.name)+'</option>';
+      });
+      html += '</select>';
+      html += '<div class="grid2 mt2">';
+      html += '<select id="discountType" onchange="App.setDiscountType(this.value)">';
+      html += '<option value="none" '+(ui.discountType==="none"?"selected":"")+'>Discount Nahi</option>';
+      html += '<option value="percent" '+(ui.discountType==="percent"?"selected":"")+'>Discount %</option>';
+      html += '<option value="amount" '+(ui.discountType==="amount"?"selected":"")+'>Discount Rs</option>';
+      html += '</select>';
+      html += '<input id="discountValue" type="number" inputmode="decimal" placeholder="Value" value="'+(ui.discountValue||"")+'" oninput="App.setDiscountValue(this.value)" '+(ui.discountType==="none"?"disabled":"")+'>';
+      html += '</div>';
+      html += '<select id="paymentSelect" class="mt2" onchange="App.setPaymentType(this.value)">';
+      html += '<option value="Cash" '+(ui.paymentType==="Cash"?"selected":"")+'>Cash</option>';
+      html += '<option value="Udhaar" '+(ui.paymentType==="Udhaar"?"selected":"")+'>Udhaar</option>';
+      html += '</select>';
+      if (ui.paymentType==="Udhaar" && !ui.customerId){
+        html += '<p style="color:#e11d48;font-size:12px;margin:4px 0 0;">Udhaar khate mein daalne ke liye saved customer select karna zaroori hai.</p>';
+      }
+      html += '<div id="cart-totals-box">'+renderCartTotalsBox()+'</div>';
+      var canSell = lines.length>0 && (ui.paymentType==="Cash" || (ui.paymentType==="Udhaar" && ui.customerId));
+      html += '<div class="grid2 mt2">';
+      html += '<button class="btn btn-ghost" onclick="App.holdSale()">&#9203; Hold Sale</button>';
+      html += '<button class="btn btn-primary" '+(canSell?"":"disabled")+' onclick="App.completeSale()">Sale Mukammal Karein</button>';
+      html += '</div>';
+      html += '</div>'; // closes cart-bottom
     }
-    html += '<div class="mt2" style="background:#0B1220;border-radius:12px;padding:12px;">';
-    html += '<div class="row-between" style="font-size:12px;color:#cbd5e1;"><span>Subtotal</span><span style="font-family:monospace;">'+fmt(subtotal)+'</span></div>';
-    if (discountAmt>0) html += '<div class="row-between" style="font-size:12px;color:#fca5a5;"><span>Discount</span><span style="font-family:monospace;">-'+fmt(discountAmt)+'</span></div>';
-    html += '<div class="row-between mt2"><span style="color:#cbd5e1;font-size:11px;font-weight:700;text-transform:uppercase;">Total</span>';
-    html += '<span style="color:#6ee7b7;font-family:monospace;font-size:22px;font-weight:bold;">'+fmt(total)+'</span></div>';
-    html += '</div>';
-    var canSell = lines.length>0 && (ui.paymentType==="Cash" || (ui.paymentType==="Udhaar" && ui.customerId));
-    html += '<div class="grid2 mt2">';
-    html += '<button class="btn btn-ghost" onclick="App.holdSale()">&#9203; Hold Sale</button>';
-    html += '<button class="btn btn-primary" '+(canSell?"":"disabled")+' onclick="App.completeSale()">Sale Mukammal Karein</button>';
-    html += '</div>';
-    html += '</div>';
+    html += '</div>'; // closes cart-inner
   }
-  html += "</div></div>";
+  html += '</div>'; // closes cart-drawer
   html += "</div>";
   return html;
 }
@@ -1265,13 +1301,14 @@ function maybeAutoSync(){
 // Actions (all UI event handlers live on window.App)
 // ---------------------------------------------------------------------
 window.App = {
-  setTab: function(t){ ui.tab=t; ui.doneSale=null; ui.khataSelected=null; ui.billingView="cart"; ui.dashSubView=null; ui.reportsSubView=null; ui.reportDrillKey=null; render(); },
+  setTab: function(t){ ui.tab=t; ui.doneSale=null; ui.khataSelected=null; ui.billingView="cart"; ui.dashSubView=null; ui.reportsSubView=null; ui.reportDrillKey=null; ui.cartExpanded=false; render(); },
   showDashSub: function(v){ ui.dashSubView=v; render(); },
   dashBack: function(){ ui.dashSubView=null; render(); },
   setKhataPeriod: function(p){ ui.khataPeriod=p; render(); },
   showBillingView: function(v){ ui.billingView=v; render(); },
 
   onSearchInput: function(v){ ui.billingQuery=v; document.getElementById("product-grid").innerHTML = renderProductGrid(); },
+  toggleCartExpanded: function(){ ui.cartExpanded=!ui.cartExpanded; render(); },
   onBillHistorySearch: function(v){ ui.billHistoryQuery=v; document.getElementById("bill-history-table").innerHTML = renderBillHistoryTable(); },
   setCategoryFilter: function(c){ ui.billingCategory=c; render(); },
   addToCart: function(pid){
@@ -1299,7 +1336,11 @@ window.App = {
   },
   setPaymentType: function(v){ ui.paymentType=v; render(); },
   setDiscountType: function(v){ ui.discountType=v; render(); },
-  setDiscountValue: function(v){ ui.discountValue=parseFloat(v)||0; render(); },
+  setDiscountValue: function(v){
+    ui.discountValue=parseFloat(v)||0;
+    var box = document.getElementById("cart-totals-box");
+    if (box) box.innerHTML = renderCartTotalsBox();
+  },
   completeSale: function(){
     var lines = cartLines();
     if (lines.length===0) return;
@@ -1341,6 +1382,7 @@ window.App = {
     ui.discountValue = 0;
     ui.pendingCustName = "";
     ui.pendingCustPhone = "";
+    ui.cartExpanded = false;
     render();
   },
   newSale: function(){ ui.doneSale=null; ui.billingView="cart"; render(); },
@@ -1369,6 +1411,7 @@ window.App = {
     ui.cart = [];
     ui.customerId = "";
     ui.paymentType = "Cash";
+    ui.cartExpanded = false;
     ui.billingView = "held";
     render();
   },
@@ -1380,6 +1423,7 @@ window.App = {
     ui.pendingCustName = h.customerName||"";
     ui.pendingCustPhone = h.customerPhone||"";
     ui.paymentType = h.paymentType||"Cash";
+    ui.cartExpanded = true;
     db.heldSales = db.heldSales.filter(function(x){ return x.id!==id; });
     saveDB();
     ui.billingView = "cart";
@@ -1486,6 +1530,7 @@ window.App = {
     ui.paymentType = "Udhaar";
     ui.discountType = "none";
     ui.discountValue = 0;
+    ui.cartExpanded = true;
     render();
   },
   saveNewEntity: function(){
