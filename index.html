@@ -246,7 +246,7 @@ var ui = {
   billingCategory: "Sab",
   customerId: "",
   paymentType: "Cash",
-  discountType: "none",
+  discountType: "amount",
   discountValue: 0,
   doneSale: null,
   chartPeriod: "daily",
@@ -625,6 +625,21 @@ function renderProductGrid(){
   }).join("");
 }
 
+function renderCartItemsLines(){
+  var lines = cartLines();
+  var html = "";
+  lines.forEach(function(l){
+    html += '<div class="cart-line"><div><div style="font-size:13px;font-weight:600;">'+escapeHtml(l.product.name)+'</div>' +
+      '<div class="muted" style="font-family:monospace;font-size:12px;">'+fmt(l.lineTotal)+'</div></div>' +
+      '<div style="display:flex;align-items:center;gap:8px;">' +
+      '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',-1)">-</button>' +
+      '<span style="width:20px;text-align:center;font-family:monospace;">'+l.qty+'</span>' +
+      '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',1)">+</button>' +
+      '</div></div>';
+  });
+  return html;
+}
+
 function computeCartTotals(){
   var lines = cartLines();
   var subtotal = lines.reduce(function(a,l){ return a+l.lineTotal; },0);
@@ -677,23 +692,13 @@ function renderBilling(){
   } else {
     html += '<div class="cart-inner">';
     html += '<div class="row-between" style="margin-bottom:6px;">';
-    html += '<span class="muted" style="font-weight:700;text-transform:uppercase;font-size:11px;">&#128221; Cart ('+lines.length+')</span>';
+    html += '<span class="muted" id="cart-count-label" style="font-weight:700;text-transform:uppercase;font-size:11px;">&#128221; Cart ('+lines.length+')</span>';
     if (lines.length>0) html += '<a class="icon-link" onclick="App.toggleCartExpanded()">&#9660; Chhota Karein</a>';
     html += '</div>';
     if (lines.length===0){
       html += '<p class="muted">Cart khali hai — product par tap karein.</p>';
     } else {
-      html += '<div class="cart-items-scroll">';
-      lines.forEach(function(l){
-        html += '<div class="cart-line"><div><div style="font-size:13px;font-weight:600;">'+escapeHtml(l.product.name)+'</div>' +
-          '<div class="muted" style="font-family:monospace;font-size:12px;">'+fmt(l.lineTotal)+'</div></div>' +
-          '<div style="display:flex;align-items:center;gap:8px;">' +
-          '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',-1)">-</button>' +
-          '<span style="width:20px;text-align:center;font-family:monospace;">'+l.qty+'</span>' +
-          '<button class="qty-btn" onclick="App.changeQty(\''+l.productId+'\',1)">+</button>' +
-          '</div></div>';
-      });
-      html += '</div>';
+      html += '<div class="cart-items-scroll" id="cart-items-scroll-box">'+renderCartItemsLines()+'</div>';
 
       html += '<div class="cart-bottom">';
       html += '<div class="grid2 mt2">';
@@ -808,6 +813,10 @@ function renderBillScreen(sale){
   html += '<div class="grid2">';
   html += '<button class="btn btn-primary" onclick="App.exportPDF()">PDF Save Karein</button>';
   html += '<button class="btn btn-ghost" onclick="App.exportJPG()">JPG Save/Share Karein</button>';
+  html += '</div>';
+  html += '<div class="grid2">';
+  html += '<button class="btn btn-ghost" style="background:#e0e7ff;color:#4338ca;border-color:#c7d2fe;" onclick="App.editBill(\''+sale.id+'\')">&#9998; Bill Sahi Karein</button>';
+  html += '<button class="btn btn-ghost" style="background:#fee2e2;color:#b91c1c;border-color:#fecaca;" onclick="App.deleteBill(\''+sale.id+'\')">&#128465; Bill Delete Karein</button>';
   html += '</div>';
   html += '<button class="btn btn-dark" onclick="App.newSale()">Nayi Sale Shuru Karein</button>';
   html += "</div>";
@@ -1322,7 +1331,13 @@ window.App = {
   },
   changeQty: function(pid, delta){
     ui.cart = ui.cart.map(function(i){ return i.productId===pid ? { productId:i.productId, qty:i.qty+delta } : i; }).filter(function(i){ return i.qty>0; });
-    render();
+    if (ui.cart.length===0){ render(); return; }
+    var scrollBox = document.getElementById("cart-items-scroll-box");
+    if (scrollBox) scrollBox.innerHTML = renderCartItemsLines();
+    var totalsBox = document.getElementById("cart-totals-box");
+    if (totalsBox) totalsBox.innerHTML = renderCartTotalsBox();
+    var countLabel = document.getElementById("cart-count-label");
+    if (countLabel) countLabel.innerHTML = "&#128221; Cart ("+cartLines().length+")";
   },
   onCustomerFieldInput: function(){ /* read at sale-time; no rerender needed */ },
   pickCustomer: function(id){
@@ -1378,7 +1393,7 @@ window.App = {
     ui.cart = [];
     ui.customerId = "";
     ui.paymentType = "Cash";
-    ui.discountType = "none";
+    ui.discountType = "amount";
     ui.discountValue = 0;
     ui.pendingCustName = "";
     ui.pendingCustPhone = "";
@@ -1392,6 +1407,44 @@ window.App = {
   viewBill: function(id){
     var s = db.sales.filter(function(x){ return x.id===id; })[0];
     if (s) ui.doneSale = s;
+    render();
+  },
+  deleteBill: function(id){
+    var s = db.sales.filter(function(x){ return x.id===id; })[0];
+    if (!s) return;
+    if (!confirm("Kya aap waqai ye bill delete karna chahte hain? Stock wapis add ho jayega aur udhaar (agar tha) khatam ho jayega.")) return;
+    db.products = db.products.map(function(p){
+      if (p.trackStock===false) return p;
+      var line = s.items.filter(function(it){ return it.productId===p.id; })[0];
+      return line ? Object.assign({}, p, { stock: p.stock+line.qty }) : p;
+    });
+    db.sales = db.sales.filter(function(x){ return x.id!==id; });
+    saveDB();
+    ui.doneSale = null;
+    ui.billingView = "cart";
+    render();
+  },
+  editBill: function(id){
+    var s = db.sales.filter(function(x){ return x.id===id; })[0];
+    if (!s) return;
+    if (!confirm("Bill ke items wapis cart mein aa jayenge aur ye purana bill delete ho jayega. Sahi kar ke dobara 'Sale Mukammal Karein' dabayein. Continue karein?")) return;
+    db.products = db.products.map(function(p){
+      if (p.trackStock===false) return p;
+      var line = s.items.filter(function(it){ return it.productId===p.id; })[0];
+      return line ? Object.assign({}, p, { stock: p.stock+line.qty }) : p;
+    });
+    db.sales = db.sales.filter(function(x){ return x.id!==id; });
+    ui.cart = s.items.map(function(it){ return { productId:it.productId, qty:it.qty }; });
+    ui.customerId = s.customerId || "";
+    ui.pendingCustName = s.customerName || "";
+    ui.pendingCustPhone = s.customerPhone || "";
+    ui.paymentType = s.paymentType || "Cash";
+    ui.discountType = s.discountType || "amount";
+    ui.discountValue = s.discountValue || 0;
+    ui.cartExpanded = true;
+    saveDB();
+    ui.doneSale = null;
+    ui.billingView = "cart";
     render();
   },
   holdSale: function(){
@@ -1528,7 +1581,7 @@ window.App = {
     ui.pendingCustName = c.name;
     ui.pendingCustPhone = c.phone||"";
     ui.paymentType = "Udhaar";
-    ui.discountType = "none";
+    ui.discountType = "amount";
     ui.discountValue = 0;
     ui.cartExpanded = true;
     render();
